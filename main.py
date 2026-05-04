@@ -24,7 +24,7 @@ class Config:
     SEEDS = [42, 2024]  
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 128
-    EPOCHS = 30
+    EPOCHS = 100
     LR = 2e-4
     WEIGHT_DECAY = 1e-3
     DATA_PATH = "Obfuscated-MalMem2022.csv"
