@@ -28,7 +28,7 @@ class Config:
     EPOCHS = 30
     LR = 2e-4
     WEIGHT_DECAY = 1e-3
-    DATA_PATH = "/kaggle/input/obfuscated-malmem2022/Obfuscated-MalMem2022.csv"
+    DATA_PATH = "Obfuscated-MalMem2022.csv"
     PROCESSED_DIR = "./processed_data"
 
 os.makedirs(Config.PROCESSED_DIR, exist_ok=True)
