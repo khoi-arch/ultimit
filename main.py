@@ -13,7 +13,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from sklearn.metrics import f1_score, accuracy_score, classification_report
-from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -22,7 +21,7 @@ from tqdm import tqdm
 # 0. CONFIG & SETUP (PHASE 0)
 # ==========================================
 class Config:
-    SEEDS = [42, 2024]  # FIX 7: Chạy nhiều seed để lấy Mean
+    SEEDS = [42, 2024]  
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 128
     EPOCHS = 30
@@ -41,7 +40,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# FIX 1: GLOBAL MAPPING (Nhất quán tuyệt đối giữa Old và New)
+# GLOBAL MAPPING 
 GLOBAL_CLASSES = [
     'benign', 'zeus', 'emotet', 'refroso', 'scar', 'reconyc',
     '180solutions', 'coolwebsearch', 'gator', 'transponder',
@@ -52,11 +51,12 @@ CLASS_TO_IDX = {k: i for i, k in enumerate(GLOBAL_CLASSES)}
 def map_global_label(c):
     c = str(c).lower()
     if 'benign' in c: return 0
+    # FIX: Bắt cứng từ khóa viết tắt để không bị rớt class
+    if 'cws' in c: return CLASS_TO_IDX['coolwebsearch']
     for k, v in CLASS_TO_IDX.items():
         if k in c: return v
     return 0
 
-# Cache DataFrame gốc để load Data nhanh trong vòng lặp Seed
 RAW_DF_CACHE = None
 
 def load_cached_df(file_path):
@@ -65,6 +65,8 @@ def load_cached_df(file_path):
         print(f"[*] Đọc CSV từ đĩa: {file_path}")
         RAW_DF_CACHE = pd.read_csv(file_path)
         RAW_DF_CACHE.columns = RAW_DF_CACHE.columns.str.strip()
+        # FIX: Phải dọn inf trước khi dropna
+        RAW_DF_CACHE.replace([np.inf, -np.inf], np.nan, inplace=True)
         RAW_DF_CACHE.dropna(inplace=True)
     return RAW_DF_CACHE.copy()
 
@@ -80,9 +82,8 @@ def get_data_old(file_path, seed):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # FIX 6: Split 3 tập Train/Val/Test (70/15/15) chống Data Leakage
     X_tmp, X_test, y_tmp, y_test = train_test_split(X_scaled, y, test_size=0.15, random_state=seed, stratify=y)
-    X_train, X_val, y_train, y_val = train_test_split(X_tmp, y_tmp, test_size=0.17647, random_state=seed, stratify=y_tmp) # 0.17647 * 0.85 ≈ 0.15
+    X_train, X_val, y_train, y_val = train_test_split(X_tmp, y_tmp, test_size=0.17647, random_state=seed, stratify=y_tmp) 
     
     return (torch.tensor(X_train, dtype=torch.float32), 
             torch.tensor(X_val, dtype=torch.float32),
@@ -97,14 +98,17 @@ def get_data_new(file_path, seed):
     y = df['Category'].apply(map_global_label).values
     X = df.drop(columns=['Class', 'Category'], errors='ignore').select_dtypes(include=[np.number]).fillna(0)
     
-    # Kỹ thuật Mới (Outlier Clipping IQR)
+    # 1. Clipping (Outlier)
     Q1 = X.quantile(0.25); Q3 = X.quantile(0.75); IQR = Q3 - Q1
     X = X.clip(lower=Q1 - 3*IQR, upper=Q3 + 3*IQR, axis=1)
     
+    # 2. FIX: Phục hồi Hybrid Scaler (Signed SQRT) để trị phân phối lệch
+    X = np.sign(X) * np.sqrt(np.abs(X))
+    
+    # 3. Standard Scaler
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # FIX 6: Split 3 tập Train/Val/Test (70/15/15)
     X_tmp, X_test, y_tmp, y_test = train_test_split(X_scaled, y, test_size=0.15, random_state=seed, stratify=y)
     X_train, X_val, y_train, y_val = train_test_split(X_tmp, y_tmp, test_size=0.17647, random_state=seed, stratify=y_tmp)
     
@@ -149,7 +153,6 @@ class DifferentialAttention(nn.Module):
         l1 = torch.matmul(q1, k1.transpose(-2, -1))/(sc+1e-6)
         l2 = torch.matmul(q2, k2.transpose(-2, -1))/(sc+1e-6)
         
-        # FIX 5: Chèn noise có điều kiện
         if self.training and use_noise: 
             l2 += 0.1 * torch.randn_like(l2)
             
@@ -167,12 +170,10 @@ class OldModel(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model))
         self.norm1 = nn.LayerNorm(d_model); self.norm2 = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, num_classes)
-        self.use_noise_flag = use_noise # FIX 5: Kiểm soát Noise flag
+        self.use_noise_flag = use_noise 
         
     def forward(self, x):
-        # FIX 3: Scaling mismatch chống lệch pha Sin/Cos
         x = torch.clamp(x, min=-5.0, max=5.0) 
-        
         tokens = self.tokenizer(x)
         cls = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls, tokens), dim=1)
@@ -193,9 +194,7 @@ class FeatureTokenizer_New(nn.Module):
 class NewModel(nn.Module):
     def __init__(self, num_features, num_classes=16, embed_dim=128):
         super().__init__()
-        # FIX 4: BatchNorm1d bị phá -> đổi thành LayerNorm (ổn định mọi kích thước batch)
         self.pre_norm = nn.LayerNorm(num_features)
-        
         self.tokenizer = FeatureTokenizer_New(num_features, embed_dim)
         self.token_norm = nn.LayerNorm(embed_dim)
         self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim))
@@ -231,9 +230,12 @@ def run_unified_training(model, train_loader, val_loader, test_loader, engine_ty
     best_val_f1 = 0.0
     best_state = None
     
+    # FIX: Tính Weights bằng Numpy thuần dựa trên tensors gốc, miễn nhiễm 100% với lỗi 0-dim của Dataloader
     all_y = train_loader.dataset.tensors[1].cpu().numpy()
-    classes = np.unique(all_y)
-    weights = compute_class_weight('balanced', classes=classes, y=all_y)
+    num_classes = 16
+    counts = np.bincount(all_y, minlength=num_classes)
+    counts_safe = np.where(counts == 0, 1, counts)
+    weights = len(all_y) / (num_classes * counts_safe)
     class_weights = torch.tensor(weights, dtype=torch.float32).to(Config.DEVICE)
     
     if engine_type == 'new':
@@ -257,13 +259,11 @@ def run_unified_training(model, train_loader, val_loader, test_loader, engine_ty
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-        # Đánh giá trên tập Validation (Chống Leakage)
         val_f1 = evaluate_loader(model, val_loader)
         if val_f1 > best_val_f1: 
             best_val_f1 = val_f1
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
             
-    # Load lại model tốt nhất trên tập Val để đánh giá Test
     model.load_state_dict(best_state)
     test_f1 = evaluate_loader(model, test_loader)
     
@@ -279,15 +279,14 @@ def run_experiments():
         print(f"❌ LỖI: Không tìm thấy file data tại {Config.DATA_PATH}!")
         return
 
-    # FIX 2: Phân tách rõ ràng Fair Comparison (Mode A) và Full Bundle (Mode B)
     configs = [
-        # --- MODE A: FAIR COMPARISON (Model đấu Model, Data đấu Data, Engine cố định) ---
+        # --- MODE A: FAIR COMPARISON ---
         {"name": "C1 (Fair): Old Data + Old Model + New Engine (No Noise)", "data": "old", "model": "old", "engine": "new", "noise": False},
         {"name": "C2 (Fair): New Data + New Model + New Engine", "data": "new", "model": "new", "engine": "new", "noise": False},
         {"name": "C3 (Fair): New Data + Old Model + New Engine (No Noise)", "data": "new", "model": "old", "engine": "new", "noise": False},
         {"name": "C4 (Fair): Old Data + New Model + New Engine", "data": "old", "model": "new", "engine": "new", "noise": False},
         
-        # --- MODE B: FULL BUNDLE (Hack/Noise) ---
+        # --- MODE B: FULL BUNDLE ---
         {"name": "C1 (Bundle): Old Data + Old Model + Old Engine (With Noise)", "data": "old", "model": "old", "engine": "old", "noise": True},
     ]
 
@@ -296,12 +295,10 @@ def run_experiments():
     print("\n🚀 BẮT ĐẦU THỰC NGHIỆM CHÍNH XÁC CAO (MULTI-SEED + NO LEAKAGE)...")
     print("-" * 70)
 
-    # FIX 7: Chạy lặp qua nhiều SEED để lấy giá trị Mean ổn định nhất
     for seed in Config.SEEDS:
         print(f"\n🌱 ĐANG CHẠY SEED: {seed}")
         seed_everything(seed)
         
-        # Load Data và Split theo seed hiện tại
         d_old = get_data_old(Config.DATA_PATH, seed)
         d_new = get_data_new(Config.DATA_PATH, seed)
 
@@ -319,7 +316,6 @@ def run_experiments():
             else:
                 model = NewModel(num_features=num_feat, num_classes=num_class)
 
-            # Hàm train giờ trả về Test_F1
             test_f1 = run_unified_training(model, train_loader, val_loader, test_loader, engine_type=cfg['engine'])
             all_results[cfg['name']].append(test_f1)
             
@@ -327,7 +323,6 @@ def run_experiments():
             torch.cuda.empty_cache()
             gc.collect()
 
-    # Tổng hợp Report
     print("\n🏆 BẢNG KẾT QUẢ TỔNG HỢP PHASE 1 (AVERAGED OVER SEEDS):")
     print("=" * 80)
     
