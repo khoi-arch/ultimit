@@ -231,7 +231,7 @@ def run_unified_training(model, train_loader, val_loader, test_loader, engine_ty
     best_val_f1 = 0.0
     best_state = None
     
-    all_y = torch.cat([y for _, y in train_loader.dataset]).numpy()
+    all_y = train_loader.dataset.tensors[1].cpu().numpy()
     classes = np.unique(all_y)
     weights = compute_class_weight('balanced', classes=classes, y=all_y)
     class_weights = torch.tensor(weights, dtype=torch.float32).to(Config.DEVICE)
