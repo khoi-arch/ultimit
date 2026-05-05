@@ -176,7 +176,9 @@ def run_hybrid_training(model, train_loader, val_loader, test_loader, lr=2e-4, w
 # ==========================================
 def run_experiments():
     try: load_cached_df(Config.DATA_PATH)
-    except FileNotFoundError: return
+    except FileNotFoundError: 
+        print(f"❌ LỖI: Không tìm thấy file data tại {Config.DATA_PATH}! Hãy check lại đường dẫn.")
+        return
 
     # --- KẾ HOẠCH PHASE 3: KÌM CƯƠNG VỊ VUA ---
     configs = [
