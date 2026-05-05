@@ -26,7 +26,7 @@ class Config:
     BATCH_SIZE = 128
     EPOCHS = 100
     PATIENCE = 15 # Ép hội tụ nhanh hơn, không lề mề
-    DATA_PATH = "/kaggle/input/obfuscated-malmem2022/Obfuscated-MalMem2022.csv" # Kiểm tra lại path nếu cần
+    DATA_PATH = "Obfuscated-MalMem2022.csv" # Kiểm tra lại path nếu cần
 
 def seed_everything(seed):
     random.seed(seed)
